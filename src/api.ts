@@ -19,7 +19,6 @@ const RECENT_FAILURE_COOLDOWN_MS = 5000 // 5 seconds
 // Using an in-memory Map to count consecutive 429s is a design choice to prioritize performance and minimize costs.
 // Limitation: This counter is local to each worker instance and not shared globally.
 let consecutive429Count: Map<string, number> = new Map()
-
 export async function handle(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
     const restResource = url.pathname.substring('/api/'.length) + url.search
