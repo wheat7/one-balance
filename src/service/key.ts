@@ -32,6 +32,12 @@ export async function listActiveKeysViaCache(env: Env, provider: string): Promis
         limit: 1000
     })) as schema.Key[]
 
+    // Do not cache empty results to avoid cache poisoning
+    if (keys.length === 0) {
+        console.warn(`no active keys found for ${provider}, not caching.`)
+        return []
+    }
+
     activeKeysCacheByProvider.set(provider, {
         data: keys,
         updatedAt: now,

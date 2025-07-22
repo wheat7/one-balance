@@ -147,21 +147,12 @@ async function forward(
                 continue
 
             case 'rate_limit_exceeded': {
-                // Increment consecutive 429 count for this key
-                const count = (consecutive429Count.get(selectedKey.key) || 0) + 1
-                consecutive429Count.set(selectedKey.key, count)
-
-                let cooldownSeconds: number
-                if (count >= Number(env.CONSECUTIVE_429_THRESHOLD)) {
-                    consecutive429Count.delete(selectedKey.key)
-                    console.error(
-                        `key ${selectedKey.key} triggered long cooldown after ${env.CONSECUTIVE_429_THRESHOLD} consecutive 429s`
-                    )
-                    cooldownSeconds = provider === 'google-ai-studio' ? util.getSecondsUntilMidnightPT() : 24 * 60 * 60
-                } else {
-                    cooldownSeconds = unifiedError.retry_after_seconds ? unifiedError.retry_after_seconds + 5 : 65
-                }
-
+                const cooldownSeconds = await analyze429CooldownSeconds(
+                    env,
+                    respFromGateway,
+                    provider,
+                    selectedKey.key
+                )
                 ctx.waitUntil(
                     keyService.setKeyModelCooldownIfAvailable(env, selectedKey.id, provider, model, cooldownSeconds)
                 )
@@ -296,13 +287,11 @@ async function keyIsInvalid(respFromGateway: Response, provider: string): Promis
     }
 }
 
-<<<<<<< HEAD
 // Using an in-memory Map to count consecutive 429s is a design choice to prioritize performance and minimize costs.
 // - Why not use D1 (DB)? To avoid database writes on every 429 error, which would increase load and latency. We only write to the DB when a key needs to be cooled down.
 // - Why not use KV? The free tier has low write quotas. Also, KV's eventual consistency makes it unsuitable for precise, real-time counting.
 // Limitation: This counter is local to each worker instance and not shared globally. If requests for the same key are routed to different instances, the count may be inaccurate.
 // However, for short-lived consecutive requests, Cloudflare often routes them to the same instance, making this a practical trade-off.
-let consecutive429Count: Map<string, number> = new Map()
 
 async function analyze429CooldownSeconds(
     env: Env,
@@ -334,38 +323,20 @@ async function analyze429CooldownSeconds(
             for (const violation of violations) {
                 if (violation.quotaId === 'GenerateRequestsPerDayPerProjectPerModel-FreeTier') {
                     return util.getSecondsUntilMidnightPT() // Requests per day (RPD) quotas reset at midnight Pacific time
-=======
-async function analyze429CooldownSeconds(respFromGateway: Response, provider: string): Promise<number> {
-    if (provider === 'google-ai-studio') {
-        try {
-            const errorBody = await respFromGateway.json<any>()
-            const quotaFailureDetail = getGoogleAiStudioErrorDetail(errorBody, 'type.googleapis.com/google.rpc.QuotaFailure')
-            if (quotaFailureDetail) {
-                const violations = quotaFailureDetail.violations || []
-                for (const violation of violations) {
-                    if (violation.quotaId === 'GenerateRequestsPerDayPerProjectPerModel-FreeTier') {
-                        console.warn('Detected RPD limit, setting 24h cooldown.')
-                        return 24 * 60 * 60
-                    }
-                    // Handle TPM (Tokens Per Minute) limit by checking the description
-                    if (violation.description?.toLowerCase().includes('tokens per minute')) {
-                        console.warn('Detected TPM limit, setting 65s cooldown.')
-                        return 65 // Wait for the full minute window to reset + buffer
-                    }
->>>>>>> 40cda97 (feat: 优化速率限制处理)
                 }
             }
-
-            const retryInfoDetail = getGoogleAiStudioErrorDetail(errorBody, 'type.googleapis.com/google.rpc.RetryInfo')
-            if (retryInfoDetail && retryInfoDetail.retryDelay) {
-                const retrySeconds = parseInt(retryInfoDetail.retryDelay.replace('s', ''))
-                console.warn(`Detected RPM limit, using retry-after: ${retrySeconds}s.`)
-                return retrySeconds + 5 // Use a slightly larger buffer
-            }
-        } catch (error) {
-            console.error('failed to parse 429 response, fallback to 65 seconds', error)
         }
+
+        const retryInfoDetail = getGoogleAiStudioErrorDetail(errorBody, 'type.googleapis.com/google.rpc.RetryInfo')
+        if (retryInfoDetail && retryInfoDetail.retryDelay) {
+            const retrySeconds = parseInt(retryInfoDetail.retryDelay.replace('s', ''))
+            console.warn(`Detected RPM limit, using retry-after: ${retrySeconds}s.`)
+            return retrySeconds + 5 // Use a slightly larger buffer
+        }
+    } catch (error) {
+        console.error('failed to parse 429 response, fallback to 65 seconds', error)
     }
+
     return 65
 }
 
