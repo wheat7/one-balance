@@ -1,6 +1,7 @@
 import * as keyService from './service/key'
 import * as util from './util'
 import type * as schema from './service/d1/schema'
+import { parseProviderError } from './error'
 
 const PROVIDER_CUSTOM_AUTH_HEADER: Record<string, string> = {
     'google-ai-studio': 'x-goog-api-key',
@@ -9,6 +10,15 @@ const PROVIDER_CUSTOM_AUTH_HEADER: Record<string, string> = {
     'azure-openai': 'api-key',
     cartesia: 'X-API-Key'
 }
+
+// A temporary, in-memory blacklist for keys that have recently failed with a retriable error.
+// The key is the key's ID, and the value is the timestamp when it can be used again.
+const recentFailures = new Map<string, number>()
+const RECENT_FAILURE_COOLDOWN_MS = 5000 // 5 seconds
+
+// Using an in-memory Map to count consecutive 429s is a design choice to prioritize performance and minimize costs.
+// Limitation: This counter is local to each worker instance and not shared globally.
+let consecutive429Count: Map<string, number> = new Map()
 
 export async function handle(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
@@ -92,19 +102,24 @@ async function forward(
     provider: string,
     model: string
 ): Promise<Response> {
-    const activeKeys = await keyService.listActiveKeysViaCache(env, provider)
-    if (activeKeys.length === 0) {
-        return new Response('No active keys available', { status: 503 })
+    let availableKeys = await keyService.listAvailableKeysViaCache(env, provider, model)
+    if (availableKeys.length === 0) {
+        return new Response(`No available keys for model ${model}`, { status: 503 })
     }
 
     const body = request.body ? await request.arrayBuffer() : null
     const MAX_RETRIES = 10
     for (let i = 0; i < MAX_RETRIES; i++) {
-        if (activeKeys.length === 0) {
-            return new Response('No active keys available', { status: 503 })
+        if (availableKeys.length === 0) {
+            return new Response(`No available keys for model ${model} after retries`, { status: 503 })
         }
 
-        const selectedKey = await selectKey(activeKeys, model)
+        const selectedKey = selectKey(availableKeys)
+        if (!selectedKey) {
+            return new Response(`No available keys for model ${model}, all are temporarily cooling down.`, {
+                status: 503
+            })
+        }
         const reqToGateway = await makeGatewayRequest(
             request.method,
             request.headers,
@@ -114,57 +129,68 @@ async function forward(
             selectedKey.key
         )
         const respFromGateway = await fetch(reqToGateway)
-        const status = respFromGateway.status
-        switch (status) {
-            // try block
-            case 400:
-                if (!(await keyIsInvalid(respFromGateway, provider))) {
-                    return respFromGateway // user error
-                }
+        if (respFromGateway.ok) {
+            consecutive429Count.delete(selectedKey.key)
+            return respFromGateway
+        }
 
-            // key is invalid, then continue to block and next key
-            case 401:
-            case 403:
+        // Standardize provider error
+        const unifiedError = await parseProviderError(provider, respFromGateway)
+        console.error(`Error from ${provider}: ${unifiedError.message}`, unifiedError.original_error)
+
+        switch (unifiedError.code) {
+            case 'invalid_api_key':
+            case 'permission_denied':
                 ctx.waitUntil(keyService.setKeyStatus(env, provider, selectedKey.id, 'blocked'))
-
-                // next key
-                console.error(
-                    `key ${selectedKey.key} is blocked due to ${respFromGateway.status} ${await respFromGateway.text()}`
-                )
-                if (activeKeys.length < 500) {
-                    // save the CPU time for Cloudflare Free plan
-                    activeKeys.splice(activeKeys.indexOf(selectedKey), 1)
-                }
+                availableKeys.splice(availableKeys.indexOf(selectedKey), 1)
+                console.error(`Key ${selectedKey.key} blocked due to: ${unifiedError.code}`)
                 continue
 
-            // try cooling down
-            case 429:
-                const sec = await analyze429CooldownSeconds(env, respFromGateway, provider, selectedKey.key)
-                ctx.waitUntil(keyService.setKeyModelCooldownIfAvailable(env, selectedKey.id, provider, model, sec))
+            case 'rate_limit_exceeded': {
+                // Increment consecutive 429 count for this key
+                const count = (consecutive429Count.get(selectedKey.key) || 0) + 1
+                consecutive429Count.set(selectedKey.key, count)
 
-                // next key
+                let cooldownSeconds: number
+                if (count >= Number(env.CONSECUTIVE_429_THRESHOLD)) {
+                    consecutive429Count.delete(selectedKey.key)
+                    console.error(
+                        `key ${selectedKey.key} triggered long cooldown after ${env.CONSECUTIVE_429_THRESHOLD} consecutive 429s`
+                    )
+                    cooldownSeconds = provider === 'google-ai-studio' ? util.getSecondsUntilMidnightPT() : 24 * 60 * 60
+                } else {
+                    cooldownSeconds = unifiedError.retry_after_seconds ? unifiedError.retry_after_seconds + 5 : 65
+                }
+
+                ctx.waitUntil(
+                    keyService.setKeyModelCooldownIfAvailable(env, selectedKey.id, provider, model, cooldownSeconds)
+                )
+                // Add to temporary black list to avoid stampede under concurrency
+                recentFailures.set(selectedKey.id, Date.now() + RECENT_FAILURE_COOLDOWN_MS)
+                availableKeys.splice(availableKeys.indexOf(selectedKey), 1)
                 console.warn(
-                    `key ${selectedKey.key} is cooling down for model ${model} due to 429 ${await respFromGateway.text()}`
+                    `Key ${selectedKey.key} cooling down for model ${model} for ${cooldownSeconds}s due to rate limit.`
                 )
-                if (activeKeys.length < 500) {
-                    activeKeys.splice(activeKeys.indexOf(selectedKey), 1)
-                }
+                continue
+            }
+
+            case 'service_unavailable':
+            case 'internal_server_error':
+                // Potentially temporary; retry with different key
+                recentFailures.set(selectedKey.id, Date.now() + RECENT_FAILURE_COOLDOWN_MS)
+                availableKeys.splice(availableKeys.indexOf(selectedKey), 1)
+                console.warn(`Retrying due to temporary error: ${unifiedError.code}`)
                 continue
 
-            case 500:
-            case 502:
-            case 503:
-            case 504:
-                console.error(`gateway returned 5xx ${await respFromGateway.text()}`)
-                continue // no backoff, just retry...
+            case 'bad_request':
+            case 'not_found':
+            case 'unknown_error':
+            default:
+                return new Response(JSON.stringify(unifiedError), {
+                    status: unifiedError.status,
+                    headers: { 'Content-Type': 'application/json' }
+                })
         }
-
-        if (status / 100 === 2) {
-            consecutive429Count.delete(selectedKey.id)
-        } else {
-            console.error(`gateway returned ${status}`)
-        }
-        return respFromGateway
     }
 
     return new Response('Internal server error after retries', { status: 500 })
@@ -187,56 +213,32 @@ function getAuthKey(request: Request, provider: string): string {
     return apiKeyStr
 }
 
-async function selectKey(keys: schema.Key[], model: string): Promise<schema.Key> {
-    let selectedKey = tryRandomSelect(keys, model) // fast path
-    if (selectedKey) {
-        return selectedKey
-    }
+function selectKey(keys: schema.Key[]): schema.Key | null {
+    const now = Date.now()
 
-    return selectFromAllKeys(keys, model)
-}
+    // Filter out keys that are in the temporary failure list.
+    const trulyAvailableKeys = keys.filter(key => {
+        const failureTimestamp = recentFailures.get(key.id)
+        if (failureTimestamp && now < failureTimestamp) {
+            return false
+        }
+        return true
+    })
 
-function tryRandomSelect(keys: schema.Key[], model: string): schema.Key | null {
-    const now = Date.now() / 1000
-    const maxAttempts = 10
-
-    for (let i = 0; i < maxAttempts; i++) {
-        const randomKey = keys[Math.floor(Math.random() * keys.length)]
-        const coolingEnd = randomKey.modelCoolings?.[model]?.end_at
-
-        if (!coolingEnd || coolingEnd < now) {
-            console.info(`selected a key ${randomKey.key} to try; count: ${i + 1}`)
-            return randomKey
+    // Cleanup expired entries from the failure map
+    for (const [keyId, timestamp] of recentFailures.entries()) {
+        if (now >= timestamp) {
+            recentFailures.delete(keyId)
         }
     }
 
-    return null
-}
-
-function selectFromAllKeys(keys: schema.Key[], model: string): schema.Key {
-    const now = Date.now() / 1000
-    const availableKeys = []
-    let bestCoolingKey: schema.Key | null = null
-    let earliestCooldownEnd = Infinity
-
-    for (const key of keys) {
-        const coolingEnd = key.modelCoolings?.[model]?.end_at
-        if (!coolingEnd || coolingEnd < now) {
-            availableKeys.push(key)
-        } else if (coolingEnd < earliestCooldownEnd) {
-            earliestCooldownEnd = coolingEnd
-            bestCoolingKey = key
-        }
+    if (trulyAvailableKeys.length === 0) {
+        return null
     }
 
-    if (availableKeys.length > 0) {
-        const selectedKey = availableKeys[Math.floor(Math.random() * availableKeys.length)]
-        console.info(`selected available key ${selectedKey.key} after full scan`)
-        return selectedKey
-    }
-
-    console.warn(`selected a cooling key ${bestCoolingKey?.key} to try`)
-    return bestCoolingKey! // may be available actually
+    const randomKey = trulyAvailableKeys[Math.floor(Math.random() * trulyAvailableKeys.length)]
+    console.info(`selected an available key ${randomKey.key} to try`)
+    return randomKey
 }
 
 async function makeGatewayRequest(
@@ -294,6 +296,7 @@ async function keyIsInvalid(respFromGateway: Response, provider: string): Promis
     }
 }
 
+<<<<<<< HEAD
 // Using an in-memory Map to count consecutive 429s is a design choice to prioritize performance and minimize costs.
 // - Why not use D1 (DB)? To avoid database writes on every 429 error, which would increase load and latency. We only write to the DB when a key needs to be cooled down.
 // - Why not use KV? The free tier has low write quotas. Also, KV's eventual consistency makes it unsuitable for precise, real-time counting.
@@ -331,19 +334,38 @@ async function analyze429CooldownSeconds(
             for (const violation of violations) {
                 if (violation.quotaId === 'GenerateRequestsPerDayPerProjectPerModel-FreeTier') {
                     return util.getSecondsUntilMidnightPT() // Requests per day (RPD) quotas reset at midnight Pacific time
+=======
+async function analyze429CooldownSeconds(respFromGateway: Response, provider: string): Promise<number> {
+    if (provider === 'google-ai-studio') {
+        try {
+            const errorBody = await respFromGateway.json<any>()
+            const quotaFailureDetail = getGoogleAiStudioErrorDetail(errorBody, 'type.googleapis.com/google.rpc.QuotaFailure')
+            if (quotaFailureDetail) {
+                const violations = quotaFailureDetail.violations || []
+                for (const violation of violations) {
+                    if (violation.quotaId === 'GenerateRequestsPerDayPerProjectPerModel-FreeTier') {
+                        console.warn('Detected RPD limit, setting 24h cooldown.')
+                        return 24 * 60 * 60
+                    }
+                    // Handle TPM (Tokens Per Minute) limit by checking the description
+                    if (violation.description?.toLowerCase().includes('tokens per minute')) {
+                        console.warn('Detected TPM limit, setting 65s cooldown.')
+                        return 65 // Wait for the full minute window to reset + buffer
+                    }
+>>>>>>> 40cda97 (feat: 优化速率限制处理)
                 }
             }
-        }
 
-        const retryInfoDetail = getGoogleAiStudioErrorDetail(errorBody, 'type.googleapis.com/google.rpc.RetryInfo')
-        if (retryInfoDetail && retryInfoDetail.retryDelay) {
-            const retrySeconds = parseInt(retryInfoDetail.retryDelay.replace('s', ''))
-            return retrySeconds + 2 // 2 seconds buffer
+            const retryInfoDetail = getGoogleAiStudioErrorDetail(errorBody, 'type.googleapis.com/google.rpc.RetryInfo')
+            if (retryInfoDetail && retryInfoDetail.retryDelay) {
+                const retrySeconds = parseInt(retryInfoDetail.retryDelay.replace('s', ''))
+                console.warn(`Detected RPM limit, using retry-after: ${retrySeconds}s.`)
+                return retrySeconds + 5 // Use a slightly larger buffer
+            }
+        } catch (error) {
+            console.error('failed to parse 429 response, fallback to 65 seconds', error)
         }
-    } catch (error) {
-        console.error('failed to parse 429 response, fallback to 65 seconds', error)
     }
-
     return 65
 }
 
