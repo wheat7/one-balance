@@ -12,14 +12,14 @@
             "binding": "DB",
             // Cloudflare D1 数据库名称（账户内唯一）
             "database_name": "one-balance",
-            // 对应的数据库 ID（可在 Cloudflare 控制台复制）
-            "database_id": "e0b2530e-648b-4405-b9ef-0d58f8734b70",
+            // 对应的数据库 ID（示例占位符，请在本地替换）
+            "database_id": "REPLACE_WITH_DB_ID",
             "migrations_dir": "src/service/d1/migrations"
         }
     ],
     "vars": {
-        // 默认环境变量
-        "AUTH_KEY": "one-balance-1235@",
+        // 默认环境变量（示例占位符，请勿提交真实密钥）
+        "AUTH_KEY": "CHANGE_ME",
         "AI_GATEWAY": "one-balance",
         "CONSECUTIVE_429_THRESHOLD": "2"
     },
@@ -37,12 +37,12 @@
                 {
                     "binding": "DB",
                     "database_name": "one-balance-dev",
-                    "database_id": "d6d887f5-66f8-43b0-aa05-3e7a4df20034",
+                    "database_id": "REPLACE_WITH_DB_ID",
                     "migrations_dir": "src/service/d1/migrations"
                 }
             ],
             "vars": {
-                "AUTH_KEY": "one-balance-1235@",
+                "AUTH_KEY": "CHANGE_ME",
                 "AI_GATEWAY": "one-balance-dev",
                 "CONSECUTIVE_429_THRESHOLD": "2"
             }
@@ -55,12 +55,12 @@
                 {
                     "binding": "DB",
                     "database_name": "one-balance-normal",
-                    "database_id": "47efab04-9c0a-4bd0-87f5-d11cfe7c9978",
+                    "database_id": "REPLACE_WITH_DB_ID",
                     "migrations_dir": "src/service/d1/migrations"
                 }
             ],
             "vars": {
-                "AUTH_KEY": "one-balance-1235@",
+                "AUTH_KEY": "CHANGE_ME",
                 "AI_GATEWAY": "one-balance-normal",
                 "CONSECUTIVE_429_THRESHOLD": "2"
             }
@@ -74,12 +74,12 @@
                 {
                     "binding": "DB",
                     "database_name": "one-balance-prod",
-                    "database_id": "b0362b96-10af-4e0f-bc79-ed52e45f45b0",
+                    "database_id": "REPLACE_WITH_DB_ID",
                     "migrations_dir": "src/service/d1/migrations"
                 }
             ],
             "vars": {
-                "AUTH_KEY": "one-balance-1235@",
+                "AUTH_KEY": "CHANGE_ME",
                 "AI_GATEWAY": "one-balance-prod",
                 "CONSECUTIVE_429_THRESHOLD": "2"
             }
