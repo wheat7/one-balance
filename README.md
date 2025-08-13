@@ -53,6 +53,55 @@ $env:AUTH_KEY = "your-super-secret-auth-key"; pnpm run deploycf
 
 - 脚本将引导你登录 `wrangler` (如果尚未登录)，自动创建所需的 D1 数据库，并部署 Worker。部署成功后，会得到一个 Worker 的 URL，例如 `https://one-balance-backend.<your-subdomain>.workers.dev`。
 
+### 脚本与配置用法（含干跑模式）
+
+- 本仓库包含增强的部署与迁移脚本，支持从环境变量或 `.dev.vars` 自动注入到 `wrangler.jsonc`（模板为 `wrangler.jsonc.tpl`，不会提交真实密钥）。
+
+- 变量注入优先级：已有进程环境变量 > `.dev.vars`。脚本会先读取 `.dev.vars`，但不会覆盖已有环境变量。
+
+- `.dev.vars` 示例（请勿提交）：
+
+```
+AUTH_KEY=your-super-secret-auth-key
+# 通用 DB_ID（或使用分环境变量）
+DB_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+# 分环境可选（优先级低于 DB_ID）
+DB_ID_DEV=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+DB_ID_NORMAL=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+DB_ID_PROD=cccccccc-cccc-cccc-cccc-cccccccccccc
+```
+
+- 部署（自动生成 `wrangler.jsonc` 并注入变量）：
+
+```bash
+# 本地或远程部署（--env 可为 dev/normal/prod；不传则使用模板默认）
+pnpm deploycf -- --env dev
+pnpm deploycf -- --env prod --remote
+
+# 干跑模式（生成配置与 types，但不执行迁移/部署）
+pnpm deploycf -- --env dev --dry-run
+# 或使用环境变量
+DRY_RUN=1 pnpm deploycf -- --env dev
+```
+
+- 迁移（D1 migrations）：
+
+```bash
+# 本地
+pnpm migrate -- --env dev
+
+# 远程
+pnpm migrate:remote -- --env dev
+
+# 干跑模式（仅打印将要执行的命令）
+pnpm migrate:remote -- --env dev --dry-run
+```
+
+> 注意
+> - `wrangler.jsonc` 会由脚本基于模板自动生成并注入真实值；`wrangler.jsonc` 已默认被 `.gitignore` 忽略，避免泄露。
+> - 模板中的 `AUTH_KEY` 与 `database_id` 使用占位符，需通过上述机制在本地注入。
+
 ## 使用方法
 
 ### 1. 配置待轮询 KEYS
