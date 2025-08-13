@@ -35,15 +35,22 @@ const dbName = envName === 'normal' ? 'one-balance-normal' : envName === 'prod' 
 
 // Load .dev.vars if present
 loadDotVarsIntoEnv(resolve(process.cwd(), '.dev.vars'))
+// Load env-specific vars (e.g., .dev.vars.dev) if --env is provided
+if (envName) {
+    loadDotVarsIntoEnv(resolve(process.cwd(), `.dev.vars.${envName}`))
+}
 
 run('pnpm init:config')
 run('pnpm wrangler types')
 
 if (dryRun) {
     console.log('[dry-run] 仅生成类型和配置，不执行 D1 迁移。')
-    console.log('[dry-run] 计划执行：' + (remote
-        ? `wrangler d1 migrations apply ${dbName} --remote` + (envName ? ` --env ${envName}` : '')
-        : `wrangler d1 migrations apply ${dbName} --local` + (envName ? ` --env ${envName}` : '')))
+    console.log(
+        '[dry-run] 计划执行：' +
+            (remote
+                ? `wrangler d1 migrations apply ${dbName} --remote` + (envName ? ` --env ${envName}` : '')
+                : `wrangler d1 migrations apply ${dbName} --local` + (envName ? ` --env ${envName}` : ''))
+    )
     process.exit(0)
 }
 

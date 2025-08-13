@@ -83,10 +83,18 @@ if (!envName) {
 if (!envName && processEnv.npm_config_env) envName = processEnv.npm_config_env
 
 const remote = rawArgs.includes('--remote') || rawArgs.includes('remote') || processEnv.npm_config_remote === 'true'
-const dryRun = rawArgs.includes('--dry-run') || rawArgs.includes('dry-run') || processEnv.DRY_RUN === '1' || processEnv.npm_config_dry_run === 'true'
+const dryRun =
+    rawArgs.includes('--dry-run') ||
+    rawArgs.includes('dry-run') ||
+    processEnv.DRY_RUN === '1' ||
+    processEnv.npm_config_dry_run === 'true'
 
 // Load .dev.vars if present, without overriding existing env
 loadDotVarsIntoEnv(resolve(process.cwd(), '.dev.vars'))
+// Load env-specific vars (e.g., .dev.vars.dev) if --env is provided
+if (envName) {
+    loadDotVarsIntoEnv(resolve(process.cwd(), `.dev.vars.${envName}`))
+}
 
 // Prepare config and types (generate wrangler.jsonc with secrets)
 materializeWranglerConfig(envName)
@@ -95,7 +103,11 @@ run('pnpm prettier --write .')
 
 if (dryRun) {
     console.log('[dry-run] 已生成 wrangler.jsonc（注入 AUTH_KEY/DB_ID 等变量），跳过迁移与部署。')
-    console.log('[dry-run] 计划执行：' + (remote ? 'pnpm migrate:remote' : 'pnpm migrate') + (envName ? ` -- --env ${envName}` : ''))
+    console.log(
+        '[dry-run] 计划执行：' +
+            (remote ? 'pnpm migrate:remote' : 'pnpm migrate') +
+            (envName ? ` -- --env ${envName}` : '')
+    )
     console.log('[dry-run] 计划执行：' + ('wrangler deploy' + (envName ? ` --env ${envName}` : '')))
     process.exit(0)
 }
