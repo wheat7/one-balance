@@ -146,12 +146,7 @@ async function forward(
                 continue
 
             case 'rate_limit_exceeded': {
-                const cooldownSeconds = await analyze429CooldownSeconds(
-                    env,
-                    respFromGateway,
-                    provider,
-                    selectedKey.key
-                )
+                const cooldownSeconds = await analyze429CooldownSeconds(env, respFromGateway, provider, selectedKey.key)
                 ctx.waitUntil(
                     keyService.setKeyModelCooldownIfAvailable(env, selectedKey.id, provider, model, cooldownSeconds)
                 )

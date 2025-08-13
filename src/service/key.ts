@@ -9,60 +9,67 @@ interface Cache<T> {
 }
 
 // only shared within a worker instance (shutdown if idle)
-// The cache key is now a composite key: `${provider}:${model}`
-let availableKeysCache: Map<string, Cache<schema.Key[]>> = new Map()
+let activeKeysCacheByProvider: Map<string, Cache<schema.Key[]>> = new Map()
 let cacheMaxAgeSeconds = 60
 
-export async function listAvailableKeysViaCache(env: Env, provider: string, model: string): Promise<schema.Key[]> {
+export async function listActiveKeysViaCache(env: Env, provider: string): Promise<schema.Key[]> {
     const now = Date.now() / 1000
-    const cacheKey = `${provider}:${model}`
-    const cache = availableKeysCache.get(cacheKey)
+    const cache = activeKeysCacheByProvider.get(provider)
 
     if (cache && now - cache.updatedAt < cacheMaxAgeSeconds && !cache.isDirty) {
         return cache.data
     }
 
-    const modelKey = model.replace(/"/g, '""')
-    const endAtPath = `$.\"${modelKey}\".end_at`
+    // may thundering herd, but it should be enough
+    const keys = (await d1.db(env).query.keys.findMany({
+        columns: {
+            id: true,
+            key: true,
+            modelCoolings: true
+        },
+        where: drizzle.and(drizzle.eq(schema.keys.status, 'active'), drizzle.eq(schema.keys.provider, provider)),
+        orderBy: drizzle.sql`RANDOM()`,
+        limit: 1000
+    })) as schema.Key[]
 
-    const keys = await d1.db(env).query.keys.findMany({
-        where: drizzle.and(
-            drizzle.eq(schema.keys.status, 'active'),
-            drizzle.eq(schema.keys.provider, provider),
-            drizzle.or(
-                drizzle.sql`json_extract(${schema.keys.modelCoolings}, ${endAtPath}) IS NULL`,
-                drizzle.sql`json_extract(${schema.keys.modelCoolings}, ${endAtPath}) <= ${now}`
-            )
-        )
-    })
-
-    if (keys.length === 0) {
-        console.warn(`no available keys found for provider ${provider} and model ${model}, not caching.`)
-        return []
-    }
-
-    availableKeysCache.set(cacheKey, {
+    activeKeysCacheByProvider.set(provider, {
         data: keys,
         updatedAt: now,
         isDirty: false
     })
 
-    console.info(`cache refreshed for ${provider}:${model}: ${keys.length} keys`)
+    console.info(`cache refreshed for ${provider}: ${keys.length} keys`)
     return keys
+}
+export async function listAvailableKeysViaCache(env: Env, provider: string, model: string): Promise<schema.Key[]> {
+    const allActiveKeys = await listActiveKeysViaCache(env, provider)
+    if (allActiveKeys.length === 0) {
+        return []
+    }
+
+    const now = Date.now() / 1000
+    const availableKeys = allActiveKeys.filter(key => {
+        if (!key.modelCoolings) {
+            return true
+        }
+
+        const modelCooldown = key.modelCoolings[model]
+        if (!modelCooldown) {
+            return true
+        }
+
+        return now >= modelCooldown.end_at
+    })
+
+    return availableKeys
 }
 
 export async function setKeyStatus(env: Env, provider: string, keyId: string, status: string) {
     await d1.db(env).update(schema.keys).set({ status }).where(drizzle.eq(schema.keys.id, keyId))
 
-    // When a key is blocked, it affects all models for that provider.
-    // We need to mark all related cache entries as dirty.
-    for (const key of availableKeysCache.keys()) {
-        if (key.startsWith(`${provider}:`)) {
-            const cache = availableKeysCache.get(key)
-            if (cache) {
-                cache.isDirty = true
-            }
-        }
+    const cache = activeKeysCacheByProvider.get(provider)
+    if (cache) {
+        cache.isDirty = true
     }
 }
 
@@ -111,9 +118,7 @@ export async function setKeyModelCooldownIfAvailable(
         .returning({ updatedId: schema.keys.id })
 
     if (result.length > 0) {
-        // Invalidate the specific cache for this provider and model.
-        const cacheKey = `${provider}:${model}`
-        const cache = availableKeysCache.get(cacheKey)
+        const cache = activeKeysCacheByProvider.get(provider)
         if (cache) {
             cache.isDirty = true
         }
@@ -133,7 +138,10 @@ export async function listKeys(
     sortOrder?: string
 ): Promise<{ keys: schema.Key[]; total: number }> {
     const db = d1.db(env)
-    const conditions = [drizzle.eq(schema.keys.provider, provider), drizzle.eq(schema.keys.status, status)]
+    const conditions = [drizzle.eq(schema.keys.provider, provider)]
+    if (status) {
+        conditions.push(drizzle.eq(schema.keys.status, status))
+    }
     if (q) {
         conditions.push(
             drizzle.or(drizzle.like(schema.keys.key, `%${q}%`), drizzle.like(schema.keys.remark, `%${q}%`))!
@@ -142,7 +150,10 @@ export async function listKeys(
 
     const where = drizzle.and(...conditions)
 
-    const totalResult = await db.select({ count: drizzle.count() }).from(schema.keys).where(where)
+    const totalResult = await db
+        .select({ count: drizzle.sql`count(*)` })
+        .from(schema.keys)
+        .where(where)
     const total = totalResult[0]?.count || 0
     if (total === 0) {
         return { keys: [], total: 0 }

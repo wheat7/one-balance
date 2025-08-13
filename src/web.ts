@@ -91,7 +91,7 @@ function parseKeysRequest(request: Request) {
     return {
         provider: providerMatch?.[1] || '',
         q: url.searchParams.get('q') || '',
-        status: url.searchParams.get('status') || 'active',
+        status: url.searchParams.get('status') || '',
         page: parseInt(url.searchParams.get('page') || '1', 10),
         pageSize: 20,
         sortBy: url.searchParams.get('sort_by') || '',
@@ -501,14 +501,14 @@ function buildStatusTabs(
     sortBy: string,
     sortOrder: string
 ): string {
-    const statuses = ['active', 'blocked']
+    const statuses = ['all', 'active', 'blocked']
     return statuses
         .map(s => {
             const isActive = s === currentStatus
             const activeClasses = isActive
                 ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30 border border-blue-600'
                 : 'bg-white/80 text-gray-800 hover:bg-white border border-gray-300 hover:border-gray-400'
-            const link = buildPageLink(provider, s, q, 1, 20, sortBy, sortOrder)
+            const link = buildPageLink(provider, s === 'all' ? '' : s, q, 1, 20, sortBy, sortOrder)
             return `<a href="${link}" class="px-6 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 ${activeClasses}">${s.charAt(0).toUpperCase() + s.slice(1)}</a>`
         })
         .join('')
