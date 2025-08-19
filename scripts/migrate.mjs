@@ -30,8 +30,12 @@ const envName = envArgIndex > -1 ? argv[envArgIndex + 1] : undefined
 const remote = argv.includes('--remote')
 const dryRun = argv.includes('--dry-run') || processEnv.DRY_RUN === '1'
 
-// Map env -> D1 database name (keep in sync with wrangler.jsonc.tpl)
-const dbName = envName === 'normal' ? 'one-balance-normal' : envName === 'prod' ? 'one-balance-prod' : 'one-balance-dev'
+// Map env -> D1 database name (can be overridden via vars)
+let dbName = envName === 'normal' ? 'one-balance-normal' : envName === 'prod' ? 'one-balance-prod' : 'one-balance-dev'
+if (processEnv.DB_NAME) dbName = processEnv.DB_NAME
+if (envName === 'dev' && processEnv.DB_NAME_DEV) dbName = processEnv.DB_NAME_DEV
+if (envName === 'normal' && processEnv.DB_NAME_NORMAL) dbName = processEnv.DB_NAME_NORMAL
+if (envName === 'prod' && processEnv.DB_NAME_PROD) dbName = processEnv.DB_NAME_PROD
 
 // Load .dev.vars if present
 loadDotVarsIntoEnv(resolve(process.cwd(), '.dev.vars'))
@@ -40,7 +44,11 @@ if (envName) {
     loadDotVarsIntoEnv(resolve(process.cwd(), `.dev.vars.${envName}`))
 }
 
-run('pnpm init:config')
+// Assume wrangler.jsonc already materialized by deploy script.
+// If running standalone, ensure wrangler.jsonc exists first.
+if (!existsSync(resolve(process.cwd(), 'wrangler.jsonc'))) {
+    console.warn('[migrate] wrangler.jsonc not found. Run deploy script or init config first.')
+}
 run('pnpm wrangler types')
 
 if (dryRun) {
