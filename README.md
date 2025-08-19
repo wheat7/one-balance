@@ -99,6 +99,7 @@ pnpm migrate:remote -- --env dev --dry-run
 ```
 
 > 注意
+>
 > - `wrangler.jsonc` 会由脚本基于模板自动生成并注入真实值；`wrangler.jsonc` 已默认被 `.gitignore` 忽略，避免泄露。
 > - 模板中的 `AUTH_KEY` 与 `database_id` 使用占位符，需通过上述机制在本地注入。
 
